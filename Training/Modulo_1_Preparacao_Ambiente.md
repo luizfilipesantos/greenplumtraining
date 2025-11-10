@@ -41,8 +41,9 @@ psql -h <hostname> -p <porta> -d <database> -U <usuario>
 
 **Exemplo:**
 ```bash
-psql -h gpmaster.empresa.com -p 5432 -d training_db -U gpadmin
+psql -h localhost -p 5432 -d db_<usuario> -U <usuario>
 ```
+*Verifique as credenciais de acesso que você recebeu.
 
 3. Digite a senha quando solicitado
 
@@ -50,6 +51,7 @@ psql -h gpmaster.empresa.com -p 5432 -d training_db -U gpadmin
 ```
 training_db=#
 ```
+*Deve mostrar o banco de dados de exemplo configurado para você.
 
 **Saída Esperada:**
 ```
@@ -59,32 +61,6 @@ Type "help" for help.
 training_db=#
 ```
 
-**Perguntas para Reflexão:**
-- O que significa o símbolo `#` no prompt?
-- Qual a diferença entre `#` e `>` no psql?
-
----
-
-### Exercício 1.1.2: Conexão com String de Conexão Completa
-
-**Objetivo:** Usar formato URI de conexão
-
-**Passos:**
-
-1. Teste a conexão usando string URI:
-```bash
-psql "postgresql://usuario:senha@hostname:porta/database"
-```
-
-**Exemplo:**
-```bash
-psql "postgresql://gpadmin:senha123@gpmaster.empresa.com:5432/training_db"
-```
-
-2. Compare com o método anterior
-
-**Nota de Segurança:**
-⚠️ Evite colocar senhas diretamente em comandos em ambientes produtivos. Use variáveis de ambiente ou arquivo `.pgpass`
 
 ---
 
@@ -96,19 +72,13 @@ psql "postgresql://gpadmin:senha123@gpmaster.empresa.com:5432/training_db"
 
 1. Configure variáveis de ambiente (Linux/Mac):
 ```bash
-export PGHOST=gpmaster.empresa.com
+export PGHOST=localhost
 export PGPORT=5432
-export PGDATABASE=training_db
-export PGUSER=gpadmin
+export PGDATABASE=<database>
+export PGUSER=<user>
+export PGPASSWORD=<senha>
 ```
 
-**Windows (PowerShell):**
-```powershell
-$env:PGHOST="gpmaster.empresa.com"
-$env:PGPORT="5432"
-$env:PGDATABASE="training_db"
-$env:PGUSER="gpadmin"
-```
 
 2. Após configurar, conecte simplesmente com:
 ```bash
@@ -117,6 +87,7 @@ psql
 
 **Resultado Esperado:**
 - Conexão automática sem precisar especificar parâmetros
+
 
 ---
 
@@ -129,7 +100,7 @@ psql
 - Consultar informações do sistema
 
 ### Conceitos Abordados
-- **Master vs Segments:** Arquitetura distribuída
+- **Master vs segmentos:** Arquitetura distribuída
 - **gp_segment_configuration:** Tabela de configuração
 - **System Catalogs:** Metadados do Greenplum
 
@@ -148,17 +119,7 @@ SELECT version();
 
 **Saída Esperada:**
 ```
-PostgreSQL 9.4.24 (Greenplum Database 6.x.x build ...)
-```
-
-2. Versão simplificada:
-```sql
-SELECT gp_version();
-```
-
-3. Via comando psql:
-```
-\! psql --version
+PostgreSQL 12.12.xxx (Greenplum Database 7.5.4 build ...)
 ```
 
 **Análise:**
@@ -174,13 +135,13 @@ SELECT gp_version();
 
 **Comandos SQL:**
 
-1. Visualize todos os segments:
+1. Visualize todos os segmentos:
 ```sql
 SELECT * FROM gp_segment_configuration 
 ORDER BY content, role;
 ```
 
-2. Conte quantos segments existem:
+2. Conte quantos segmentos existem:
 ```sql
 SELECT 
     role,
@@ -190,7 +151,7 @@ GROUP BY role
 ORDER BY role;
 ```
 
-3. Identifique segments ativos:
+3. Identifique segmentos ativos:
 ```sql
 SELECT 
     content,
@@ -199,7 +160,7 @@ SELECT
     port,
     status
 FROM gp_segment_configuration
-WHERE status = 'u'  -- 'u' = up
+WHERE status = 'u'
 ORDER BY content;
 ```
 
@@ -211,9 +172,9 @@ ORDER BY content;
 - **status = 'u':** Up (ativo)
 
 **Perguntas para Reflexão:**
-- Quantos segments primários existem?
+- Quantos segmentos primários existem?
 - Existem mirrors configurados?
-- Todos os segments estão ativos?
+- Todos os segmentos estão ativos?
 
 ---
 
@@ -332,13 +293,58 @@ WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'gp_toolkit')
 ORDER BY schemaname, tablename;
 ```
 
+---
+
 2. Verifique a configuração de distribuição de uma tabela (conceito importante no Greenplum):
 ```sql
 SELECT 
-    tablename,
-    schemaname
-FROM pg_tables
-WHERE schemaname = 'public'
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    CASE 
+        WHEN d.policytype = 'p' THEN 'PARTITIONED'
+        WHEN d.policytype = 'r' THEN 'REPLICATED'
+        ELSE 'HASH'
+    END AS distribution_policy,
+    CASE 
+        WHEN d.policytype = 'p' THEN 
+            (SELECT string_agg(a.attname, ', ')
+             FROM pg_attribute a
+             WHERE a.attrelid = c.oid
+             AND a.attnum = ANY(d.distkey))
+        ELSE NULL
+    END AS distribution_key
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN gp_distribution_policy d ON d.localoid = c.oid
+WHERE c.relkind = 'r'
+  AND n.nspname = 'public'
+ORDER BY c.relname
+LIMIT 5;
+```
+
+**Entendendo as Tabelas do Sistema:**
+- **pg_class:** Catálogo que armazena informações sobre todas as relações (tabelas, índices, views, etc.)
+- **pg_namespace:** Catálogo que contém informações sobre schemas (namespaces)
+- **gp_distribution_policy:** View específica do Greenplum que define como os dados são distribuídos entre os segmentos
+- **pg_attribute:** Catálogo que contém informações sobre colunas das tabelas
+
+**Interpretação dos Resultados:**
+- **HASH:** Distribuição por hash (padrão, dados distribuídos uniformemente)
+- **REPLICATED:** Tabela replicada em todos os segmentos
+- **PARTITIONED:** Distribuição baseada em colunas específicas
+- **distribution_key:** Coluna(s) usada(s) para distribuir os dados
+
+---
+
+3. Alternativa simplificada usando gp_toolkit:
+```sql
+SELECT 
+    sotdschemaname as schema_name,
+    sotdtablename as table_name,
+    pg_size_pretty(sotdsize) as table_size
+FROM gp_toolkit.gp_size_of_table_disk
+WHERE sotdschemaname = 'public'
+ORDER BY sotdsize DESC
 LIMIT 5;
 ```
 
@@ -363,9 +369,9 @@ SELECT 'Database Conectado:' as info, current_database() as detalhes;
 -- 3. Usuário
 SELECT 'Usuário:' as info, current_user as detalhes;
 
--- 4. Total de Segments
+-- 4. Total de segmentos
 SELECT 
-    'Total de Segments:' as info,
+    'Total de segmentos:' as info,
     COUNT(*) as detalhes
 FROM gp_segment_configuration
 WHERE role = 'p' AND content >= 0;
@@ -374,8 +380,8 @@ WHERE role = 'p' AND content >= 0;
 SELECT 
     'Status do Cluster:' as info,
     CASE 
-        WHEN COUNT(*) = 0 THEN 'Todos segments UP'
-        ELSE 'Existem segments DOWN: ' || COUNT(*)::text
+        WHEN COUNT(*) = 0 THEN 'Todos segmentos UP'
+        ELSE 'Existem segmentos DOWN: ' || COUNT(*)::text
     END as detalhes
 FROM gp_segment_configuration
 WHERE status != 'u';
@@ -400,7 +406,7 @@ WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema';
 ### Habilidades Adquiridas
 ✅ Conectar ao cluster Greenplum via psql  
 ✅ Verificar versão e configuração do cluster  
-✅ Identificar master e segments  
+✅ Identificar master e segmentos  
 ✅ Navegar entre databases e schemas  
 ✅ Usar comandos básicos do psql  
 ✅ Consultar informações do sistema  
@@ -419,28 +425,6 @@ WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema';
 
 ### Próximos Passos
 No **Módulo 2**, você aprenderá a criar e modificar estruturas de banco de dados (DDL), incluindo schemas, databases e tabelas com distribuição específica do Greenplum.
-
----
-
-## Notas do Instrutor
-
-### Pontos de Atenção
-- [ ] Garantir que todos conseguiram conectar
-- [ ] Validar credenciais antes da aula
-- [ ] Preparar ambiente com databases de exemplo
-- [ ] Testar conectividade de rede
-- [ ] Ter backup de acesso via ferramenta gráfica (DBeaver, pgAdmin)
-
-### Dicas de Apresentação
-- Demonstre ao vivo cada conexão
-- Mostre erros comuns e como resolver
-- Incentive uso de tab completion
-- Explique visualmente a arquitetura master/segments
-
-### Materiais de Apoio
-- Diagrama da arquitetura do cluster
-- Cheat sheet de comandos psql
-- Troubleshooting de conexão
 
 ---
 
