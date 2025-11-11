@@ -471,6 +471,67 @@ SET status = 'PROCESSADO'
 WHERE transacao_id BETWEEN 1000 AND 2000;
 ```
 
+**Interpretando o resultado do EXPLAIN:**
+
+```
+                                                        QUERY PLAN
+------------------------------------------------------------------------------------------------------------------------
+ Update on transacoes_heap  (cost=0.00..592.87 rows=495 width=1) (actual time=0.000..61.614 rows=0 loops=1)
+   ->  Seq Scan on transacoes_heap  (cost=0.00..473.08 rows=989 width=64) (actual time=59.072..59.182 rows=506 loops=1)
+         Filter: ((transacao_id >= 1000) AND (transacao_id <= 2000))
+         Rows Removed by Filter: 499257
+ Optimizer: GPORCA
+ Planning Time: 6.216 ms
+   (slice0)    Executor memory: 41K bytes avg x 2 workers, 41K bytes max (seg0).
+ Memory used:  128000kB
+ Execution Time: 62.617 ms
+```
+
+**Análise detalhada:**
+
+1. **Update on transacoes_heap** - Operação de UPDATE
+   - `actual time=0.000..61.614 rows=0` - UPDATE não retorna linhas (rows=0 é normal)
+   - Tempo real: 61.614ms para completar a operação
+
+2. **Seq Scan on transacoes_heap** - Varredura sequencial da tabela
+   - `rows=989` (estimativa) vs `rows=506` (real) - Estimativa do otimizador foi 2x maior
+   - `actual time=59.072..59.182` - Tempo real de scan: ~59ms (maior parte do tempo total)
+   - `width=64` - Largura média da linha em bytes
+
+3. **Filter: (transacao_id >= 1000 AND transacao_id <= 2000)**
+   - Filtro aplicado durante o scan
+   - **Rows Removed by Filter: 499257** - Das ~500k linhas totais, removeu 499.257
+   - Apenas 506 linhas atenderam o critério (foram atualizadas)
+   - **Seletividade: ~0.1%** (506/500000) - Query muito seletiva!
+
+4. **Métricas de Performance:**
+   - `Planning Time: 6.216 ms` - Tempo para gerar o plano de execução
+   - `Execution Time: 62.617 ms` - Tempo total de execução
+   - `Memory used: 128000kB` (~125MB) - Memória consumida
+   - `Optimizer: GPORCA` - Otimizador utilizado
+
+**Por que é positivo para HEAP?**
+
+✅ **UPDATE in-place eficiente:** Tabelas HEAP permitem UPDATE diretamente no local (in-place), ao contrário de AO tables que precisariam reescrever dados
+
+✅ **Tempo de execução aceitável:** 62ms para atualizar 506 linhas em uma tabela de 500k é rápido
+
+✅ **Baixo uso de memória:** Apenas 125MB de memória para processar
+
+✅ **MVCC (Multi-Version Concurrency Control):** HEAP suporta MVCC nativamente, permitindo:
+   - Leituras simultâneas durante UPDATE
+   - Sem lock de leitura
+   - Rollback eficiente
+
+⚠️ **Ponto de Discussão!**
+- **Seq Scan em tabela grande:** Para 500k linhas, varreu toda tabela
+- **Solução:** Se UPDATEs por `transacao_id` forem frequentes, considere criar índice:
+  ```sql
+  CREATE INDEX idx_transacao_id ON transacoes_heap(transacao_id);
+  ```
+  Isso mudaria de Seq Scan para Index Scan quando seletividade < 5%
+
+
 **Quando usar HEAP (Row-Oriented):**
 - ✅ Tabelas com UPDATEs e DELETEs frequentes
 - ✅ Queries que acessam maioria das colunas
@@ -482,15 +543,15 @@ WHERE transacao_id BETWEEN 1000 AND 2000;
 
 ### Exercício 2.2.2: Tabela Append-Optimized Row (AO)
 
-**Objetivo:** Usar tabelas append-optimized para carga em massa
+**Objetivo:** Usar tabelas append-optimized para cargas em massa
 
-**Cenário:** Tabela de fatos com inserções batch, sem updates
+**Cenário:** Tabela com inserções batch, sem updates, que utilizam a linha completa.
 
 **Passos:**
 
 1. Crie tabela AO row-oriented:
 ```sql
-CREATE TABLE fatos_vendas_ao (
+CREATE TABLE stg_vendas_ao (
     venda_id BIGINT,
     data_venda DATE,
     loja_id INTEGER,
@@ -508,7 +569,7 @@ DISTRIBUTED BY (venda_id);
 
 2. Insira dados e compare tamanho:
 ```sql
-INSERT INTO fatos_vendas_ao
+INSERT INTO stg_vendas_ao
 SELECT 
     i,
     CURRENT_DATE - (random() * 365)::INTEGER,
@@ -521,22 +582,17 @@ SELECT
     (random() * 500)::NUMERIC(10,2),
     0   -- será calculado
 FROM generate_series(1, 1000000) i;
-
--- Atualiza valores calculados (LENTO em AO!)
-UPDATE fatos_vendas_ao 
-SET valor_total = quantidade * valor_unitario,
-    margem = (quantidade * valor_unitario) - (quantidade * custo_produto);
-
--- Tamanho
-SELECT pg_size_pretty(pg_total_relation_size('fatos_vendas_ao'));
 ```
 
-3. Teste SELECT completo (acessa todas colunas):
 ```sql
-EXPLAIN ANALYZE
-SELECT * FROM fatos_vendas_ao 
-WHERE data_venda = CURRENT_DATE - 30
-LIMIT 1000;
+-- Atualiza valores calculados (LENTO em AO!)
+UPDATE stg_vendas_ao 
+SET valor_total = quantidade * valor_unitario,
+    margem = (quantidade * valor_unitario) - (quantidade * custo_produto);
+```
+```sql
+-- Tamanho
+SELECT pg_size_pretty(pg_total_relation_size('stg_vendas_ao'));
 ```
 
 **Características do AO Row:**
@@ -577,12 +633,12 @@ DISTRIBUTED BY (venda_id);
 2. Insira os mesmos dados:
 ```sql
 INSERT INTO fatos_vendas_aoco
-SELECT * FROM fatos_vendas_ao;
+SELECT * FROM stg_vendas_ao;
 
 -- Compare tamanhos
 SELECT 
     'AO Row' as table_type,
-    pg_size_pretty(pg_total_relation_size('fatos_vendas_ao')) as size
+    pg_size_pretty(pg_total_relation_size('stg_vendas_ao')) as size
 UNION ALL
 SELECT 
     'AOCO Column',
@@ -621,7 +677,7 @@ ORDER BY data_venda;
 -- Análise de colunas acessadas em AOCO
 SELECT 
     a.attname as column_name,
-    pg_size_pretty(pg_column_size(a.attname::text)) as column_size
+    pg_size_pretty(pg_column_size(a.attname::text)::bigint) as column_size
 FROM pg_attribute a
 JOIN pg_class c ON a.attrelid = c.oid
 WHERE c.relname = 'fatos_vendas_aoco'
@@ -665,14 +721,16 @@ SELECT loja_id, SUM(valor_total)
 FROM fatos_vendas_heap 
 WHERE data_venda >= CURRENT_DATE - 30
 GROUP BY loja_id;
-
+```
+```sql
 -- AO Row
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT loja_id, SUM(valor_total) 
 FROM fatos_vendas_ao 
 WHERE data_venda >= CURRENT_DATE - 30
 GROUP BY loja_id;
-
+```
+```sql
 -- AOCO Column
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT loja_id, SUM(valor_total) 
@@ -686,10 +744,12 @@ GROUP BY loja_id;
 -- Teste em todas as três tabelas
 EXPLAIN ANALYZE
 SELECT * FROM fatos_vendas_heap WHERE venda_id < 1000;
-
+```
+```sql
 EXPLAIN ANALYZE
 SELECT * FROM fatos_vendas_ao WHERE venda_id < 1000;
-
+```
+```sql
 EXPLAIN ANALYZE
 SELECT * FROM fatos_vendas_aoco WHERE venda_id < 1000;
 ```
@@ -734,7 +794,8 @@ CREATE TABLE vendas_nocomp (
 )
 WITH (appendoptimized=true, orientation=row, compresstype=none)
 DISTRIBUTED BY (venda_id);
-
+```
+```sql
 -- Compressão zlib (padrão, balanceado)
 CREATE TABLE vendas_zlib (
     venda_id BIGINT,
@@ -746,7 +807,8 @@ CREATE TABLE vendas_zlib (
 )
 WITH (appendoptimized=true, orientation=row, compresstype=zlib, compresslevel=5)
 DISTRIBUTED BY (venda_id);
-
+```
+```sql
 -- Compressão zstd (mais recente, melhor em GP7+)
 CREATE TABLE vendas_zstd (
     venda_id BIGINT,
@@ -771,8 +833,11 @@ SELECT
     (random() * 1000)::NUMERIC(12,2),
     'Venda produto ' || (i % 100) || ' quantidade ' || (i % 10) || ' descricao repetida para aumentar compressao'
 FROM generate_series(1, 500000) i;
-
+```
+```sql
 INSERT INTO vendas_zlib SELECT * FROM vendas_nocomp;
+```
+```sql
 INSERT INTO vendas_zstd SELECT * FROM vendas_nocomp;
 ```
 
@@ -795,11 +860,13 @@ ORDER BY size_bytes DESC;
 -- Sem compressão
 EXPLAIN ANALYZE
 SELECT COUNT(*), SUM(valor) FROM vendas_nocomp WHERE data_venda >= CURRENT_DATE - 30;
-
+```
+```sql
 -- Com zlib
 EXPLAIN ANALYZE
 SELECT COUNT(*), SUM(valor) FROM vendas_zlib WHERE data_venda >= CURRENT_DATE - 30;
-
+```
+```sql
 -- Com zstd
 EXPLAIN ANALYZE
 SELECT COUNT(*), SUM(valor) FROM vendas_zstd WHERE data_venda >= CURRENT_DATE - 30;
@@ -865,7 +932,8 @@ SELECT
     END,
     'Observacao da venda numero ' || i || ' com detalhes adicionais para aumentar volume de texto'
 FROM generate_series(1, 1000000) i;
-
+```
+```sql
 UPDATE vendas_detalhadas SET valor_total = quantidade * valor_unitario;
 ```
 
@@ -874,13 +942,26 @@ UPDATE vendas_detalhadas SET valor_total = quantidade * valor_unitario;
 SELECT 
     a.attname as column_name,
     t.typname as data_type,
-    pg_size_pretty(pg_column_size(a.attname::text)) as column_size,
-    co.compresstype as compression_type,
-    co.compresslevel as compression_level
+    CASE 
+        WHEN ae.attoptions IS NOT NULL THEN
+            (SELECT option_value 
+             FROM unnest(ae.attoptions) AS option(option_value)
+             WHERE option_value LIKE 'compresstype=%'
+             LIMIT 1)
+        ELSE 'none'
+    END as compression_type,
+    CASE 
+        WHEN ae.attoptions IS NOT NULL THEN
+            (SELECT option_value 
+             FROM unnest(ae.attoptions) AS option(option_value)
+             WHERE option_value LIKE 'compresslevel=%'
+             LIMIT 1)
+        ELSE NULL
+    END as compression_level
 FROM pg_attribute a
 JOIN pg_class c ON a.attrelid = c.oid
 JOIN pg_type t ON a.atttypid = t.oid
-LEFT JOIN pg_attribute_encoding co ON co.attrelid = a.attrelid AND co.attnum = a.attnum
+LEFT JOIN pg_attribute_encoding ae ON ae.attrelid = a.attrelid AND ae.attnum = a.attnum
 WHERE c.relname = 'vendas_detalhadas'
   AND a.attnum > 0
   AND NOT a.attisdropped
@@ -907,9 +988,12 @@ CREATE TABLE vendas_detalhadas_simples (
 )
 WITH (appendoptimized=true, orientation=column, compresstype=zlib, compresslevel=5)
 DISTRIBUTED BY (venda_id);
+```
+```sql
 
 INSERT INTO vendas_detalhadas_simples SELECT * FROM vendas_detalhadas;
-
+```
+```sql
 -- Compare tamanhos
 SELECT 
     'Otimizada por coluna' as version,
@@ -947,7 +1031,8 @@ CREATE TABLE metrics_comp1 (
 )
 WITH (appendoptimized=true, orientation=column, compresstype=zlib, compresslevel=1)
 DISTRIBUTED BY (id);
-
+```
+```sql
 -- Compressão alta (máxima)
 CREATE TABLE metrics_comp9 (
     id BIGINT,
@@ -971,7 +1056,8 @@ SELECT
     'Metadata texto repetido ' || (i % 100)
 FROM generate_series(1, 1000000) i;
 \timing off
-
+```
+```sql
 -- Level 9
 \timing on
 INSERT INTO metrics_comp9
