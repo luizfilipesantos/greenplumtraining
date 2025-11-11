@@ -1101,7 +1101,7 @@ FROM (
 - Sem updates após inserção
 - Retenção: 5 anos
 
-**Tarefa:** Projete a tabela ideal
+**Qual melhor modelo?**
 
 **Solução Proposta:**
 ```sql
@@ -1219,7 +1219,7 @@ ORDER BY 1, 2;
 - Volume: 50k pedidos ativos simultâneos
 - Pedidos arquivados após conclusão
 
-**Tarefa:** Projete a tabela ideal
+**Qual melhor modelo?**
 
 **Solução Proposta:**
 ```sql
@@ -1263,45 +1263,6 @@ DISTRIBUTED BY (pedido_id);  -- Co-located com pedidos
 - ✅ **Índices:** Aceleram queries por cliente/status
 - ❌ **Sem compressão:** HEAP não comprime, mas é pequena
 
-**Arquivamento periódico:**
-```sql
--- Tabela de arquivo (AOCO, alta compressão)
-CREATE TABLE pedidos_historico (
-    pedido_id BIGINT,
-    cliente_id INTEGER,
-    data_pedido TIMESTAMP,
-    data_conclusao TIMESTAMP,
-    status_final VARCHAR(30),
-    valor_total NUMERIC(12,2),
-    observacoes TEXT,
-    vendedor_id INTEGER
-)
-WITH (appendoptimized=true, orientation=column, compresstype=zstd, compresslevel=7)
-DISTRIBUTED BY (pedido_id)
-PARTITION BY RANGE (data_conclusao)
-(
-    START ('2020-01-01'::DATE) END ('2025-12-31'::DATE) EVERY (INTERVAL '1 quarter')
-);
-
--- Processo de arquivamento (executar periodicamente)
-INSERT INTO pedidos_historico
-SELECT 
-    pedido_id,
-    cliente_id,
-    data_pedido,
-    data_atualizacao as data_conclusao,
-    status as status_final,
-    valor_total,
-    observacoes,
-    vendedor_id
-FROM pedidos_ativos
-WHERE status IN ('CONCLUIDO', 'CANCELADO')
-  AND data_atualizacao < CURRENT_DATE - 30;
-
-DELETE FROM pedidos_ativos
-WHERE status IN ('CONCLUIDO', 'CANCELADO')
-  AND data_atualizacao < CURRENT_DATE - 30;
-```
 
 ---
 
@@ -1314,7 +1275,7 @@ WHERE status IN ('CONCLUIDO', 'CANCELADO')
 - Sem updates, apenas inserções
 - Retenção detalhada: 90 dias, agregada: 2 anos
 
-**Tarefa:** Projete o modelo completo
+**Qual melhor modelo?**
 
 **Solução Proposta:**
 ```sql
@@ -1329,8 +1290,8 @@ CREATE TABLE iot_leituras_raw (
     metadata JSONB
 )
 WITH (
-    appendoptimized=true,
-    orientation=column,
+    appendoptimized=true, --> Porque? Muita operação de Insert apenas.
+    orientation=column, --> Porque? Maioria das consultas agregadas AVG, MAX, MIN.
     compresstype=zstd,
     compresslevel=3  -- Baixo: alta taxa inserção
 )
@@ -1339,73 +1300,6 @@ PARTITION BY RANGE (timestamp)
 (
     START (CURRENT_DATE - 90) END (CURRENT_DATE + 1) EVERY (INTERVAL '1 day')
 );
-
--- Encoding otimizado
-ALTER TABLE iot_leituras_raw
-    ALTER COLUMN timestamp SET ENCODING (compresstype=rle_type),
-    ALTER COLUMN tipo_metrica SET ENCODING (compresstype=rle_type),
-    ALTER COLUMN unidade SET ENCODING (compresstype=rle_type);
-
--- Tabela agregada (longo prazo)
-CREATE TABLE iot_leituras_agregadas (
-    sensor_id INTEGER,
-    data DATE,
-    hora INTEGER,  -- 0-23
-    tipo_metrica VARCHAR(50),
-    media DOUBLE PRECISION,
-    minimo DOUBLE PRECISION,
-    maximo DOUBLE PRECISION,
-    desvio_padrao DOUBLE PRECISION,
-    total_leituras INTEGER,
-    leituras_validas INTEGER
-)
-WITH (
-    appendoptimized=true,
-    orientation=column,
-    compresstype=zstd,
-    compresslevel=7  -- Alto: dados históricos
-)
-DISTRIBUTED BY (sensor_id, data)
-PARTITION BY RANGE (data)
-(
-    START ('2023-01-01'::DATE) END ('2025-12-31'::DATE) EVERY (INTERVAL '1 month')
-);
-
--- Processo de agregação (executar hourly via cron)
-CREATE OR REPLACE FUNCTION agregar_iot_leituras()
-RETURNS void AS $$
-BEGIN
-    INSERT INTO iot_leituras_agregadas
-    SELECT 
-        sensor_id,
-        timestamp::DATE as data,
-        EXTRACT(HOUR FROM timestamp) as hora,
-        tipo_metrica,
-        AVG(valor) as media,
-        MIN(valor) as minimo,
-        MAX(valor) as maximo,
-        STDDEV(valor) as desvio_padrao,
-        COUNT(*) as total_leituras,
-        COUNT(*) FILTER (WHERE qualidade >= 80) as leituras_validas
-    FROM iot_leituras_raw
-    WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '2 hours'
-      AND timestamp < CURRENT_TIMESTAMP - INTERVAL '1 hour'
-    GROUP BY sensor_id, data, hora, tipo_metrica
-    ON CONFLICT DO NOTHING;
-END;
-$$ LANGUAGE plpgsql;
-```
-
-**Estratégia de retenção:**
-```sql
--- Drop partições antigas (executar diariamente)
--- Raw: manter últimos 90 dias
-ALTER TABLE iot_leituras_raw 
-DROP PARTITION FOR (CURRENT_DATE - 91);
-
--- Agregada: manter 2 anos (drop após 25 meses)
-ALTER TABLE iot_leituras_agregadas
-DROP PARTITION FOR (CURRENT_DATE - INTERVAL '25 months');
 ```
 
 ---
@@ -1450,24 +1344,12 @@ CREATE TABLE fato_vendas_otimizado (
 )
 WITH (appendoptimized=true, orientation=column)
 DISTRIBUTED BY (cliente_id);  -- Co-located com dim_cliente!
+-- Ou seja, a dim produto será replicada em todos os segmentos, então o join com ela será local, e a fato foi distribuida pra dar match com a dim cliente.
+-- Este desenho é um exemplo para ilustrar essa possibilidade, e não é uma regra.
 
--- Teste JOIN otimizado
-EXPLAIN
-SELECT 
-    v.venda_id,
-    c.nome as cliente,
-    p.nome as produto,
-    v.valor_total
-FROM fato_vendas_otimizado v
-JOIN dim_cliente_colocated c ON v.cliente_id = c.cliente_id  -- Co-located: SEM motion
-JOIN dim_produto_replicated p ON v.produto_id = p.produto_id  -- Replicated: SEM motion
-WHERE v.data_venda >= CURRENT_DATE - 30;
 ```
 
-**Análise do plano:**
-- ✅ Sem "Redistribute Motion" (co-location funcionou)
-- ✅ Processamento paralelo em todos segmentos
-- ✅ Menor uso de rede e memória
+
 
 ---
 
@@ -1481,131 +1363,25 @@ WHERE v.data_venda >= CURRENT_DATE - 30;
 -- Tabela problemática
 CREATE TABLE vendas_problematica (
     id SERIAL,
-    data VARCHAR(20),  -- ❌ Deveria ser DATE
+    data VARCHAR(20),  -- ❌ 
     cliente TEXT,
     cpf VARCHAR(14),
     produto TEXT,
     qtd INTEGER,
-    preco TEXT,  -- ❌ Deveria ser NUMERIC
-    total TEXT,  -- ❌ Deveria ser NUMERIC
+    preco TEXT,  -- ❌ 
+    total TEXT,  -- ❌ 
     vendedor VARCHAR(100),
     loja VARCHAR(100),
     obs TEXT
 )
-DISTRIBUTED BY (id);  -- ❌ SERIAL causa skew!
--- ❌ HEAP com 100M+ linhas
--- ❌ Sem compressão
--- ❌ Tipos inadequados
+DISTRIBUTED BY (id);  -- ❌ 
+
 ```
 
-**Tarefa:** Redesenhe completamente:
+**Qual melhor modelo?**
 
-**Solução Completa:**
-```sql
--- 1. Normalizar: separar dimensões
-CREATE TABLE dim_clientes_novo (
-    cliente_id SERIAL PRIMARY KEY,
-    nome VARCHAR(200),
-    cpf VARCHAR(14) UNIQUE,
-    data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
-DISTRIBUTED REPLICATED;  -- Pequena, muito usada em JOINs
 
-CREATE TABLE dim_produtos_novo (
-    produto_id SERIAL PRIMARY KEY,
-    nome VARCHAR(200),
-    categoria VARCHAR(100),
-    preco_base NUMERIC(10,2)
-)
-DISTRIBUTED REPLICATED;
-
-CREATE TABLE dim_lojas_novo (
-    loja_id SERIAL PRIMARY KEY,
-    nome VARCHAR(100),
-    cidade VARCHAR(100),
-    estado CHAR(2)
-)
-DISTRIBUTED REPLICATED;
-
-CREATE TABLE dim_vendedores_novo (
-    vendedor_id SERIAL PRIMARY KEY,
-    nome VARCHAR(100),
-    loja_id INTEGER
-)
-DISTRIBUTED REPLICATED;
-
--- 2. Tabela fato otimizada
-CREATE TABLE fato_vendas_novo (
-    venda_id BIGINT,  -- Gerado externamente, não SERIAL
-    data_venda DATE NOT NULL,
-    cliente_id INTEGER NOT NULL,
-    produto_id INTEGER NOT NULL,
-    vendedor_id INTEGER NOT NULL,
-    loja_id INTEGER NOT NULL,
-    quantidade INTEGER NOT NULL CHECK (quantidade > 0),
-    valor_unitario NUMERIC(10,2) NOT NULL,
-    valor_total NUMERIC(12,2) NOT NULL,
-    observacoes TEXT
-)
-WITH (
-    appendoptimized=true,
-    orientation=column,
-    compresstype=zstd,
-    compresslevel=5
-)
-DISTRIBUTED BY (venda_id)  -- Alta cardinalidade
-PARTITION BY RANGE (data_venda)
-(
-    START ('2020-01-01'::DATE) END ('2026-01-01'::DATE) EVERY (INTERVAL '1 month')
-);
-
--- 3. Otimizar encoding por coluna
-ALTER TABLE fato_vendas_novo
-    ALTER COLUMN data_venda SET ENCODING (compresstype=rle_type),
-    ALTER COLUMN produto_id SET ENCODING (compresstype=zstd, compresslevel=7),
-    ALTER COLUMN vendedor_id SET ENCODING (compresstype=rle_type),
-    ALTER COLUMN loja_id SET ENCODING (compresstype=rle_type);
-
--- 4. Migração de dados (com limpeza)
-INSERT INTO fato_vendas_novo
-SELECT 
-    id::BIGINT as venda_id,
-    data::DATE as data_venda,
-    -- Lookup IDs das dimensões...
-    -- (simplificado, na prática precisaria de JOINs/lookups)
-    1 as cliente_id,
-    1 as produto_id,
-    1 as vendedor_id,
-    1 as loja_id,
-    qtd as quantidade,
-    preco::NUMERIC(10,2) as valor_unitario,
-    total::NUMERIC(12,2) as valor_total,
-    obs as observacoes
-FROM vendas_problematica
-WHERE data IS NOT NULL 
-  AND qtd > 0;
-
--- 5. Compare resultados
-SELECT 
-    'Antes (problematica)' as versao,
-    pg_size_pretty(pg_total_relation_size('vendas_problematica')) as tamanho,
-    COUNT(*) as linhas
-FROM vendas_problematica
-UNION ALL
-SELECT 
-    'Depois (fato + dims)',
-    pg_size_pretty(
-        pg_total_relation_size('fato_vendas_novo') +
-        pg_total_relation_size('dim_clientes_novo') +
-        pg_total_relation_size('dim_produtos_novo') +
-        pg_total_relation_size('dim_lojas_novo') +
-        pg_total_relation_size('dim_vendedores_novo')
-    ),
-    COUNT(*)
-FROM fato_vendas_novo;
-```
-
-**Melhorias Implementadas:**
+**Melhorias possíveis:**
 - ✅ Normalização (dimensões separadas)
 - ✅ Tipos de dados corretos
 - ✅ Storage colunar (AOCO)
