@@ -29,3 +29,5 @@ obj/
 *.bak
 *.log
 
+# HubSpot config file
+hubspot.config.yml

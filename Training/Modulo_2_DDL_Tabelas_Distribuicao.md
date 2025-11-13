@@ -832,7 +832,7 @@ SELECT
     (random() * 1000)::INTEGER,
     (random() * 1000)::NUMERIC(12,2),
     'Venda produto ' || (i % 100) || ' quantidade ' || (i % 10) || ' descricao repetida para aumentar compressao'
-FROM generate_series(1, 500000) i;
+FROM generate_series(1, 5000000) i;
 ```
 ```sql
 INSERT INTO vendas_zlib SELECT * FROM vendas_nocomp;
@@ -913,28 +913,19 @@ DISTRIBUTED BY (venda_id);
 INSERT INTO vendas_detalhadas
 SELECT 
     i,
-    CURRENT_DATE - (i % 365),
+    CURRENT_DATE,
     ('08:00:00'::TIME + (i % 86400 || ' seconds')::INTERVAL)::TIME,
     (i % 5000) + 1,
     'Cliente Nome ' || ((i % 5000) + 1),
     (i % 200) + 1,
     'Produto Nome ' || ((i % 200) + 1),
-    'Categoria ' || (i % 10),  -- Apenas 10 categorias
+    'VENDA',  
     (random() * 10)::INTEGER + 1,
     (random() * 500)::NUMERIC(10,2),
     0,
-    CASE (i % 5)
-        WHEN 0 THEN 'CONCLUIDO'
-        WHEN 1 THEN 'PENDENTE'
-        WHEN 2 THEN 'CANCELADO'
-        WHEN 3 THEN 'PROCESSANDO'
-        ELSE 'AGUARDANDO'
-    END,
+    'CONCLUIDO',
     'Observacao da venda numero ' || i || ' com detalhes adicionais para aumentar volume de texto'
 FROM generate_series(1, 1000000) i;
-```
-```sql
-UPDATE vendas_detalhadas SET valor_total = quantidade * valor_unitario;
 ```
 
 3. Analise compressão por coluna:
@@ -1004,6 +995,39 @@ SELECT
     pg_size_pretty(pg_total_relation_size('vendas_detalhadas_simples'));
 ```
 
+5. A importância de entender o comportamento dos dados!
+
+```sql
+-- Vamos fazer agora uma atualização nos dados da tabela
+UPDATE vendas_detalhadas SET valor_total = quantidade * valor_unitario;
+```
+```sql
+-- Verificar novamente os tamanhos:
+SELECT 
+    'Otimizada por coluna' as version,
+    pg_size_pretty(pg_total_relation_size('vendas_detalhadas')) as size
+UNION ALL
+SELECT 
+    'Compressao uniforme',
+    pg_size_pretty(pg_total_relation_size('vendas_detalhadas_simples'));
+```
+**O que aconteceu??**
+- **Registros 'mortos** Algumas operações deixam registros 'mortos' pra trás nas tabelas, e esses registros continuam ocupando espaço, e esse espaço vai prejudicar a performance geral!
+- **Vacuum** mais pra frente vamos ver os conceitos de Vacuum, que vão ajudar a liberar esse espaço morto das tabelas.
+```sql
+-- Verificando registros mortos
+SELECT 
+    schemaname,
+    relname,
+    n_live_tup as linhas_vivas,
+    n_dead_tup as linhas_mortas,
+    last_vacuum,
+    last_autovacuum
+FROM pg_stat_user_tables
+WHERE relname IN ('vendas_detalhadas');
+```
+
+
 **Estratégias de Compressão por Tipo de Coluna:**
 - **IDs numéricos:** zstd level 5-7
 - **Datas/Timestamps:** rle_type (valores repetidos)
@@ -1048,6 +1072,8 @@ DISTRIBUTED BY (id);
 ```sql
 -- Level 1
 \timing on
+```
+```sql
 INSERT INTO metrics_comp1
 SELECT 
     i,
@@ -1055,13 +1081,13 @@ SELECT
     random() * 1000,
     'Metadata texto repetido ' || (i % 100)
 FROM generate_series(1, 1000000) i;
-\timing off
 ```
 ```sql
 -- Level 9
-\timing on
 INSERT INTO metrics_comp9
 SELECT * FROM metrics_comp1;
+```
+```sql
 \timing off
 ```
 
@@ -1076,10 +1102,6 @@ FROM (
 ) AS t(tablename);
 ```
 
-**Recomendações:**
-- **Level 1-3:** Dados temporários, alta taxa de inserção
-- **Level 5-6:** Balanceamento geral (recomendado)
-- **Level 7-9:** Dados arquivados, leitura < escrita
 
 ---
 
@@ -1136,7 +1158,8 @@ PARTITION BY RANGE (data_venda)
 (
     START ('2020-01-01'::DATE) END ('2025-12-31'::DATE) EVERY (INTERVAL '1 month')
 );
-
+```
+```sql
 -- Otimizações específicas de coluna
 ALTER TABLE fato_vendas_ecommerce 
     ALTER COLUMN data_venda SET ENCODING (compresstype=rle_type),
@@ -1193,7 +1216,8 @@ SELECT
         ELSE 'LOJA_FISICA'
     END
 FROM generate_series(1, 5000000) i;
-
+```
+```sql
 -- Teste query analítica
 EXPLAIN ANALYZE
 SELECT 
@@ -1206,6 +1230,12 @@ FROM fato_vendas_ecommerce
 WHERE data_venda >= CURRENT_DATE - 365
 GROUP BY 1, 2
 ORDER BY 1, 2;
+-- Este explain vai mostrar Redistribute motion
+-- Porque?? --> Group By!
+-- Segment 0: Jan/2024 Região 1 → pode ter algumas vendas
+-- Segment 1: Jan/2024 Região 1 → pode ter outras vendas
+-- Para calcular COUNT(*), SUM(valor_total) corretamente,
+-- precisa JUNTAR todas as vendas de (Jan/2024, Região 1) no mesmo segmento!
 ```
 
 ---
@@ -1237,12 +1267,14 @@ CREATE TABLE pedidos_ativos (
 )
 DISTRIBUTED BY (pedido_id);
 -- HEAP (padrão), ideal para UPDATEs frequentes
-
+```
+```sql
 -- Índices para queries comuns
 CREATE INDEX idx_pedidos_cliente ON pedidos_ativos(cliente_id);
 CREATE INDEX idx_pedidos_status ON pedidos_ativos(status);
 CREATE INDEX idx_pedidos_data ON pedidos_ativos(data_pedido);
-
+```
+```sql
 -- Tabela para itens (1:N)
 CREATE TABLE itens_pedido (
     item_id BIGSERIAL,
@@ -1321,7 +1353,8 @@ CREATE TABLE dim_produto_replicated (
     preco_lista NUMERIC(10,2)
 )
 DISTRIBUTED REPLICATED;
-
+```
+```sql
 -- Dimensão média: mesma distribuição do fato
 CREATE TABLE dim_cliente_colocated (
     cliente_id INTEGER PRIMARY KEY,
@@ -1332,7 +1365,8 @@ CREATE TABLE dim_cliente_colocated (
     estado CHAR(2)
 )
 DISTRIBUTED BY (cliente_id);  -- Mesmo que será usado em fato_vendas
-
+```
+```sql
 -- Fato distribuído por chave que faz JOIN
 CREATE TABLE fato_vendas_otimizado (
     venda_id BIGINT,
@@ -1345,11 +1379,212 @@ CREATE TABLE fato_vendas_otimizado (
 WITH (appendoptimized=true, orientation=column)
 DISTRIBUTED BY (cliente_id);  -- Co-located com dim_cliente!
 -- Ou seja, a dim produto será replicada em todos os segmentos, então o join com ela será local, e a fato foi distribuida pra dar match com a dim cliente.
--- Este desenho é um exemplo para ilustrar essa possibilidade, e não é uma regra.
+```
+
+**Popule as tabelas com dados de exemplo:**
+
+```sql
+-- 1. Insira dados na dimensão produto (REPLICATED)
+INSERT INTO dim_produto_replicated
+SELECT 
+    i,
+    'Produto ' || i,
+    'Categoria ' || (i % 20),
+    'Marca ' || (i % 50),
+    (random() * 1000 + 10)::NUMERIC(10,2)
+FROM generate_series(1, 500) i;
+
+```
+
+```sql
+-- 2. Insira dados na dimensão cliente (co-located)
+INSERT INTO dim_cliente_colocated
+SELECT 
+    i,
+    'Cliente ' || i,
+    LPAD(i::TEXT, 11, '0') || '000',
+    CURRENT_DATE - (random() * 36500)::INTEGER,
+    'Cidade ' || (i % 100),
+    CASE (i % 27)
+        WHEN 0 THEN 'SP' WHEN 1 THEN 'RJ' WHEN 2 THEN 'MG' WHEN 3 THEN 'RS'
+        WHEN 4 THEN 'PR' WHEN 5 THEN 'SC' WHEN 6 THEN 'BA' WHEN 7 THEN 'PE'
+        WHEN 8 THEN 'CE' WHEN 9 THEN 'PA' WHEN 10 THEN 'MA' WHEN 11 THEN 'GO'
+        WHEN 12 THEN 'AM' WHEN 13 THEN 'ES' WHEN 14 THEN 'PB' WHEN 15 THEN 'RN'
+        WHEN 16 THEN 'AL' WHEN 17 THEN 'MT' WHEN 18 THEN 'PI' WHEN 19 THEN 'DF'
+        WHEN 20 THEN 'MS' WHEN 21 THEN 'SE' WHEN 22 THEN 'RO' WHEN 23 THEN 'TO'
+        WHEN 24 THEN 'AC' WHEN 25 THEN 'AP' ELSE 'RR'
+    END
+FROM generate_series(1, 10000) i;
+
+-- Verifique distribuição: deve estar balanceada entre segmentos
+SELECT 
+    gp_segment_id, 
+    COUNT(*) as total_clientes,
+    ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) as percentual
+FROM gp_dist_random('dim_cliente_colocated')
+GROUP BY gp_segment_id
+ORDER BY gp_segment_id;
+-- Resultado esperado: Distribuição uniforme (~5000 por segmento se 2 segmentos)
+```
+
+```sql
+-- 3. Insira dados na fato vendas (DISTRIBUTED BY cliente_id)
+INSERT INTO fato_vendas_otimizado
+SELECT 
+    i,
+    CURRENT_DATE - (random() * 365)::INTEGER,
+    (random() * 9999 + 1)::INTEGER,  -- cliente_id (1-10000)
+    (random() * 499 + 1)::INTEGER,   -- produto_id (1-500)
+    (random() * 10 + 1)::INTEGER,    -- quantidade
+    (random() * 5000 + 100)::NUMERIC(12,2)  -- valor_total
+FROM generate_series(1, 1000000) i;
+
+-- Verifique distribuição da fato
+SELECT 
+    gp_segment_id, 
+    COUNT(*) as total_vendas,
+    ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) as percentual
+FROM gp_dist_random('fato_vendas_otimizado')
+GROUP BY gp_segment_id
+ORDER BY gp_segment_id;
+-- Resultado esperado: Distribuição balanceada (~500k por segmento)
+```
+
+**Análise de Performance: JOIN por cliente_id (CO-LOCATED) vs produto_id (REPLICATED)**
+
+```sql
+-- 🎯 TESTE 1: JOIN por cliente_id (CO-LOCATED - SEM MOTION!)
+EXPLAIN ANALYZE
+SELECT 
+    c.estado,
+    COUNT(*) as total_vendas,
+    SUM(f.valor_total) as receita_total,
+    AVG(f.valor_total) as ticket_medio
+FROM fato_vendas_otimizado f
+INNER JOIN dim_cliente_colocated c ON f.cliente_id = c.cliente_id
+WHERE f.data_venda >= CURRENT_DATE - 90
+GROUP BY c.estado
+ORDER BY receita_total DESC;
+-- ✅ RESULTADO ESPERADO:
+-- Redistribute DEPOIS do Filtro (Group By)
+-- Colocated Join
+
+```
+```sql
+EXPLAIN ANALYZE
+SELECT 
+    f.cliente_id,
+    COUNT(*) as total_vendas,
+    SUM(f.valor_total) as receita_total,
+    AVG(f.valor_total) as ticket_medio
+FROM fato_vendas_otimizado f
+INNER JOIN dim_cliente_colocated c ON f.cliente_id = c.cliente_id
+WHERE f.data_venda >= CURRENT_DATE - 90
+GROUP BY f.cliente_id
+ORDER BY f.cliente_id DESC;
+-- ✅ RESULTADO ESPERADO:
+-- SEM Redistribute 
+-- Colocated Join
 
 ```
 
 
+```sql
+-- 🔄 TESTE 2: JOIN por produto_id (REPLICATED - SEM MOTION, mas diferente!)
+EXPLAIN ANALYZE
+SELECT 
+    p.categoria,
+    p.marca,
+    COUNT(*) as total_vendas,
+    SUM(f.valor_total) as receita_total,
+    SUM(f.quantidade) as qtd_vendida
+FROM fato_vendas_otimizado f
+INNER JOIN dim_produto_replicated p ON f.produto_id = p.produto_id
+WHERE f.data_venda >= CURRENT_DATE - 90
+GROUP BY p.categoria, p.marca
+ORDER BY receita_total DESC;
+
+-- ✅ RESULTADO ESPERADO:
+-- 1. dim_produto_replicated é REPLICATED (cópia completa em cada segmento)
+-- 2. fato_vendas_otimizado está distribuída por cliente_id (não produto_id)
+-- 3. MAS como dim_produto está replicada, JOIN é LOCAL!
+-- 4. Cada segmento tem TODOS os produtos, então não precisa buscar em outro segmento
+-- 5. Redistribute ocorre em função do group by, mas é após o filtro.
+```
+
+
+**📊 Comparação de Performance:**
+
+```sql
+-- Execute todos os testes e compare:
+-- (Execute 3x cada e pegue a média para eliminar variação de cache)
+
+\timing on
+```
+```sql
+-- Teste 1: Co-located JOIN (cliente_id)
+SELECT COUNT(*) FROM fato_vendas_otimizado f
+INNER JOIN dim_cliente_colocated c ON f.cliente_id = c.cliente_id
+WHERE f.data_venda >= CURRENT_DATE - 90;
+```
+```sql
+-- Teste 2: Replicated JOIN (produto_id)
+SELECT COUNT(*) FROM fato_vendas_otimizado f
+INNER JOIN dim_produto_replicated p ON f.produto_id = p.produto_id
+WHERE f.data_venda >= CURRENT_DATE - 90;
+```
+```sql
+\timing off
+```
+
+**Resultados Esperados:**
+
+| Teste | Estratégia | Motion? | Tempo Médio | Observação |
+|-------|-----------|---------|-------------|------------|
+| 1 | Co-located (cliente_id) | ❌ Não | ~250ms | ✅ JOIN totalmente local |
+| 2 | Replicated (produto_id) | ❌ Não | ~230ms | ✅ Dimensão replicada em todos segmentos |
+
+
+**🎯 Lições Aprendidas:**
+
+1. **Co-location (mesmo DISTRIBUTED BY):**
+   - ✅ Ideal para JOINs frequentes com dimensões **grandes/médias**
+   - ✅ Zero motion no JOIN
+   - ✅ Escalável (distribui o trabalho)
+   - ⚠️ Só funciona para 1 chave de distribuição por vez
+
+2. **Replicação (DISTRIBUTED REPLICATED):**
+   - ✅ Ideal para dimensões **pequenas** (< 100k linhas, < 50MB)
+   - ✅ JOIN com qualquer fato é local
+   - ✅ Flexível (múltiplas fatos podem fazer JOIN sem motion)
+   - ❌ Não escala bem (replica em TODOS os segmentos)
+   - ❌ Aumenta uso de memória/disco em cada segmento
+
+**Decisão de Design:**
+
+```sql
+-- Para schema de data warehouse típico:
+
+-- Dimensões PEQUENAS (< 100k linhas): REPLICATE
+CREATE TABLE dim_produto (...) DISTRIBUTED REPLICATED;
+CREATE TABLE dim_categoria (...) DISTRIBUTED REPLICATED;
+CREATE TABLE dim_tempo (...) DISTRIBUTED REPLICATED;
+
+-- Dimensões MÉDIAS/GRANDES: Co-locate com fato principal
+CREATE TABLE dim_cliente (...) DISTRIBUTED BY (cliente_id);
+
+-- Fato: Distribua pela FK mais usada em JOINs
+CREATE TABLE fato_vendas (
+    cliente_id INTEGER,  -- FK mais crítica
+    produto_id INTEGER,  -- OK se dim_produto for REPLICATED
+    ...
+) DISTRIBUTED BY (cliente_id);  -- Match com dim_cliente
+
+-- Se tiver múltiplas fatos, pode precisar diferentes distribuições:
+CREATE TABLE fato_estoque (...) DISTRIBUTED BY (produto_id);
+CREATE TABLE fato_vendas (...) DISTRIBUTED BY (cliente_id);
+-- Cada fato otimizada para seus JOINs principais
+```
 
 ---
 
@@ -1437,11 +1672,6 @@ DISTRIBUTED BY (id);  -- ❌
    - [ ] Espaço é preocupação?
    - [ ] Colunas têm padrões repetitivos?
    - [ ] Performance de escrita é crítica?
-
-5. **Particionamento:**
-   - [ ] Tabela tem milhões de linhas?
-   - [ ] Queries filtram por data/período?
-   - [ ] Precisa dropar dados antigos?
 
 ### Comandos Principais
 

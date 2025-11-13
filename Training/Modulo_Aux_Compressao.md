@@ -67,7 +67,6 @@ A compressão no Greenplum está disponível **apenas para tabelas Append-Optimi
 - ✅ **Melhor custo-benefício** geral
 - ✅ Velocidade excepcional (mais rápido que zlib)
 - ✅ Ratio competitivo (3-5x típico)
-- ✅ Baixo uso de CPU
 - ✅ Suporta níveis 1-19
 - ✅ Excelente para workloads analíticos
 
@@ -76,14 +75,15 @@ A compressão no Greenplum está disponível **apenas para tabelas Append-Optimi
 - ✅ Tabelas de fatos grandes (> 10 GB)
 - ✅ Queries de leitura pesada
 - ✅ Data warehousing moderno
-- ✅ Quando CPU não é gargalo
 - ✅ Dados mistos (texto, numérico, datas)
 
 #### Quando NÃO Usar
-- ❌ CPU já saturada (> 80% uso constante)
 - ❌ Workload de inserção ultra-rápida (streaming)
 - ❌ Dados já comprimidos (JPEG, PNG, ZIP)
 - ❌ Compatibilidade com Greenplum < 6.0
+
+#### CPU
+- ⚠️ Toda compressão utiliza CPU. Monitorar uso da CPU para balancear algoritmos e níveis de compressão.
 
 #### Sintaxe
 ```sql
@@ -222,8 +222,8 @@ CREATE TABLE pedidos (
 #### Quando Usar
 - ✅ Dados já comprimidos (ZIP, JPEG, PNG, AVRO comprimido)
 - ✅ Dados criptografados (alta entropia)
-- ✅ Teste/desenvolvimento (debugging)
-- ✅ Tabelas temporárias de curta duração
+- ✅ Teste/desenvolvimento (debugging) ⚠️
+- ✅ Tabelas temporárias de curta duração (Stages que serão apagadas ao final da carga)
 - ✅ Dados com altíssima variação (hashes, tokens)
 - ✅ CPU é gargalo crítico
 
