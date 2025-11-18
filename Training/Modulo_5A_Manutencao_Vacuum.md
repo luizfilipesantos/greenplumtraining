@@ -448,7 +448,7 @@ SELECT
     schemaname,
     tablename,
     partitiontablename
-FROM pg_partitions
+FROM pg_catalog.pg_partitions
 WHERE tablename = 'vendas_particionada'
 ORDER BY partitionrank DESC
 LIMIT 5;
@@ -1115,3 +1115,4 @@ No **Módulo 5B**, você aprenderá sobre detecção de skew (dados e processame
 ---
 
 **Fim do Módulo 5A**
+

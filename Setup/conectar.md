@@ -2,7 +2,7 @@
 
 **No seu PowerShell (Windows):**
 ```powershell
-ssh -o ServerAliveInterval=600 -L 5432:localhost:5432 gpadmin@179.185.2.116
+ssh -o ServerAliveInterval=1200 -L 5432:localhost:5432 gpadmin@179.185.2.116
 ```
 *Verifique a senha
 
