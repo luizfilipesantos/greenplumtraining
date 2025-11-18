@@ -28,6 +28,10 @@
 - **Delimitadores e Encodings:** Customização
 - **Error Handling:** SEGMENT REJECT LIMIT
 
+### Preparação
+- Acessar a pasta /tmp do servidor
+- Sempre colocar seu nome de usuário na frente de cada arquivo a ser lido gravado, ex: usuario_arquivo.csv.
+
 ### COPY vs INSERT
 
 | Aspecto | COPY | INSERT |
@@ -79,7 +83,7 @@ EOF
 
 3. Carregue dados com COPY:
 ```sql
-COPY clientes_importacao
+\COPY clientes_importacao
 FROM '/tmp/clientes.csv'
 WITH (
     FORMAT CSV,
@@ -92,7 +96,8 @@ WITH (
 4. Verifique os dados carregados:
 ```sql
 SELECT * FROM clientes_importacao ORDER BY cliente_id;
-
+```
+```sql
 SELECT 
     COUNT(*) as total_clientes,
     COUNT(CASE WHEN ativo THEN 1 END) as ativos,
@@ -144,7 +149,7 @@ DISTRIBUTED BY (venda_id);
 
 3. Carregue na tabela staging:
 ```sql
-COPY vendas_staging
+\COPY vendas_staging
 FROM '/tmp/vendas.txt'
 WITH (
     FORMAT TEXT,
@@ -155,7 +160,18 @@ WITH (
 
 4. Transforme e insira na tabela final:
 ```sql
-INSERT INTO vendas_particionada (
+CREATE TABLE vendas_final (
+    venda_id INTEGER,
+    data_venda date,
+    cliente_id INTEGER,
+    produto_id integer,
+    quantidade INTEGER,
+    valor_total numeric
+)
+DISTRIBUTED BY (venda_id);
+```
+```sql
+INSERT INTO vendas_final (
     venda_id,
     data_venda,
     cliente_id,
@@ -171,9 +187,10 @@ SELECT
     quantidade,
     quantidade * valor_unitario_str::NUMERIC(10,2) as valor_total
 FROM vendas_staging;
-
+```
+```sql
 -- Verifique
-SELECT * FROM vendas_particionada 
+SELECT * FROM vendas_final 
 WHERE venda_id IN (1,2,3,4,5)
 ORDER BY venda_id;
 ```
@@ -196,7 +213,7 @@ ORDER BY venda_id;
 
 1. Exporte dados para CSV:
 ```sql
-COPY (
+\COPY (
     SELECT 
         cliente_id,
         nome,
@@ -217,13 +234,13 @@ WITH (
 
 2. Exporte relatório agregado:
 ```sql
-COPY (
+\COPY (
     SELECT 
         DATE_TRUNC('month', data_venda)::DATE as mes,
         COUNT(*) as total_vendas,
         SUM(valor_total) as receita,
         AVG(valor_total) as ticket_medio
-    FROM vendas_particionada
+    FROM vendas_final
     WHERE data_venda >= '2024-01-01'
     GROUP BY 1
     ORDER BY 1
@@ -324,15 +341,15 @@ CREATE TABLE load_errors (
 
 **Objetivo:** Otimizar cargas grandes
 
-**Cenário:** Carregar milhões de registros
+**Cenário:** Carregar muitos de registros
 
 **Passos:**
 
 1. Gere arquivo grande:
 ```bash
-# Gera arquivo com 1 milhão de linhas
-for i in {1..1000000}; do
-    echo "$i,Cliente_$i,$(printf '%011d' $i),cliente$i@email.com,2024-01-01"
+# Gera arquivo com 100 mil linhas
+for i in {1..100000}; do
+    echo "$i,Cliente_$i,1000,cliente@email.com,2024-01-01"
 done > /tmp/clientes_1m.csv
 ```
 
@@ -358,7 +375,7 @@ DISTRIBUTED BY (cliente_id);
 ```sql
 \timing on
 
-COPY clientes_bulk
+\COPY clientes_bulk
 FROM '/tmp/clientes_1m.csv'
 WITH (
     FORMAT CSV,
@@ -368,15 +385,22 @@ WITH (
 \timing off
 ```
 
+4. Otimizando a carga:
+```sql
+-- Split de arquivos
+split -l 10000 /tmp/clientes_1m.csv /tmp/clientes_batch_
+```
+```sql
+-- Load parallel
+-- Sessão 1 (execute em uma janela psql)
+\copy clientes_bulk FROM '/tmp/clientes_batch_aa' CSV DELIMITER ','
+-- Sessão 2 (execute em OUTRA janela psql simultaneamente)
+\copy clientes_bulk FROM '/tmp/clientes_batch_ab' CSV DELIMITER ','
+```
+
+
 4. Analise a distribuição:
 ```sql
-ANALYZE clientes_bulk;
-
-SELECT 
-    COUNT(*) as total,
-    pg_size_pretty(pg_total_relation_size('clientes_bulk')) as size
-FROM clientes_bulk;
-
 -- Verifique distribuição entre segmentos
 SELECT 
     gp_segment_id,
@@ -409,6 +433,9 @@ ORDER BY gp_segment_id;
 - **Protocolos:** file://, gpfdist://, s3://, hdfs://
 - **gpfdist:** Servidor de arquivos paralelo
 
+### O Que São External Tables?
+External Tables são tabelas virtuais que permitem acessar dados armazenados fora do banco de dados como se fossem tabelas normais, mas sem importar os dados fisicamente pra dentro do banco. Seria como 'anexar' arquivos externos, tratando esses arquivos como tabelas de origem e/ou destino.
+
 ### External Tables vs COPY
 
 | Aspecto | External Table | COPY |
@@ -421,79 +448,7 @@ ORDER BY gp_segment_id;
 
 ---
 
-### Exercício 4.2.1: Readable External Table - Básico
-
-**Objetivo:** Criar tabela externa para ler arquivos
-
-**Cenário:** Acessar dados sem carregar no banco
-
-**Passos:**
-
-1. Crie arquivo de dados:
-```bash
-cat > /tmp/produtos_externos.csv << 'EOF'
-produto_id,nome,categoria,preco,estoque
-1001,Notebook Dell,Informática,3500.00,15
-1002,Mouse Logitech,Informática,89.90,200
-1003,Teclado Mecânico,Informática,450.00,50
-1004,Monitor LG 27,Informática,1200.00,30
-1005,Webcam HD,Informática,250.00,80
-EOF
-```
-
-2. Crie External Table:
-```sql
-CREATE EXTERNAL TABLE ext_produtos (
-    produto_id INTEGER,
-    nome VARCHAR(200),
-    categoria VARCHAR(100),
-    preco NUMERIC(10,2),
-    estoque INTEGER
-)
-LOCATION ('file://HOST/tmp/produtos_externos.csv')
-FORMAT 'CSV' (
-    HEADER
-    DELIMITER ','
-);
-```
-
-**Nota:** Substitua `HOST` pelo hostname real do master ou use `gpfdist`.
-
-3. Consulte a external table:
-```sql
-SELECT * FROM ext_produtos;
-
-SELECT 
-    categoria,
-    COUNT(*) as qtd_produtos,
-    AVG(preco) as preco_medio,
-    SUM(estoque) as estoque_total
-FROM ext_produtos
-GROUP BY categoria;
-```
-
-4. Use como fonte de ETL:
-```sql
--- Carregue dados da external table para tabela interna
-INSERT INTO dim_produtos (produto_id, nome, categoria, preco_base)
-SELECT 
-    produto_id,
-    nome,
-    categoria,
-    preco
-FROM ext_produtos
-WHERE estoque > 0;
-```
-
-**Vantagens de External Tables:**
-- ✅ Dados não ocupam espaço no GP
-- ✅ Acesso direto a arquivos
-- ✅ Ideal para staging/landing zone
-- ✅ Integração com data lakes
-
----
-
-### Exercício 4.2.2: External Table com gpfdist
+### Exercício 4.2.1: External Table com gpfdist
 
 **Objetivo:** Usar servidor de arquivos paralelo
 
@@ -636,77 +591,6 @@ SELECT venda_id, data_venda, valor_total
 FROM vendas_particionada
 WHERE data_venda >= CURRENT_DATE - 365;
 ```
-
----
-
-### Exercício 4.2.4: External Table com S3 (Cloud)
-
-**Objetivo:** Integrar com AWS S3
-
-**Cenário:** Ler/Escrever dados no S3
-
-**Passos:**
-
-1. Configure credenciais S3:
-```sql
--- Criar external table apontando para S3
-CREATE EXTERNAL TABLE ext_s3_vendas (
-    venda_id BIGINT,
-    data_venda DATE,
-    cliente_id INTEGER,
-    valor NUMERIC(10,2)
-)
-LOCATION (
-    's3://seu-bucket/dados/vendas/2024/*.csv'
-    's3://seu-bucket/dados/vendas/2023/*.csv'
-)
-FORMAT 'CSV'
-ON MASTER
--- Credenciais via configuração ou IAM role
--- ACCESS_KEY_ID 'sua_key'
--- SECRET_ACCESS_KEY 'sua_secret'
-SEGMENT REJECT LIMIT 1000 ROWS;
-```
-
-2. Leia dados do S3:
-```sql
-SELECT 
-    DATE_TRUNC('month', data_venda) as mes,
-    COUNT(*) as vendas,
-    SUM(valor) as receita
-FROM ext_s3_vendas
-GROUP BY 1
-ORDER BY 1;
-```
-
-3. Escreva dados para S3:
-```sql
-CREATE WRITABLE EXTERNAL TABLE ext_s3_export (
-    ano INTEGER,
-    mes INTEGER,
-    categoria VARCHAR(100),
-    receita NUMERIC(15,2)
-)
-LOCATION ('s3://seu-bucket/relatorios/mensal/')
-FORMAT 'CSV';
-
-INSERT INTO ext_s3_export
-SELECT 
-    EXTRACT(YEAR FROM data_venda),
-    EXTRACT(MONTH FROM data_venda),
-    p.categoria,
-    SUM(v.valor_total)
-FROM vendas_particionada v
-JOIN dim_produtos p ON v.produto_id = p.produto_id
-GROUP BY 1, 2, 3;
-```
-
-**Protocolos Suportados:**
-- **file://** - Sistema de arquivos local
-- **gpfdist://** - Servidor paralelo
-- **s3://** - AWS S3
-- **hdfs://** - Hadoop HDFS
-- **pxf://** - Greenplum Platform Extension Framework
 
 ---
 
