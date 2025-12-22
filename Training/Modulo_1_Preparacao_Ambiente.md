@@ -1,6 +1,5 @@
 # Módulo 1: Preparação do Ambiente
 
-**Duração Total:** 45-60 minutos  
 **Objetivo:** Familiarizar os participantes com o ambiente Greenplum, conexões básicas e comandos de navegação.
 
 ---

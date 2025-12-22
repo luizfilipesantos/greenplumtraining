@@ -1,6 +1,5 @@
 # Módulo Auxiliar: Otimização de Queries no Greenplum 7
 
-**Duração:** 60 minutos  
 **Objetivo:** Aprender a analisar, diagnosticar e otimizar queries lentas no Greenplum 7.
 
 ---

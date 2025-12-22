@@ -1,6 +1,5 @@
 # Módulo 2: DDL - Criação de Tabelas e Estratégias de Distribuição
 
-**Duração Total:** 90-120 minutos  
 **Objetivo:** Dominar a criação de tabelas no Greenplum, compreendendo distribuição de dados, orientação de armazenamento e compressão para otimizar performance.
 
 ---

@@ -1,6 +1,5 @@
 # Módulo 3-1: Particionamento no Greenplum 7
 
-**Duração:** 90 minutos  
 **Objetivo:** Dominar técnicas de particionamento para otimizar performance e gerenciamento de dados no Greenplum 7.
 
 **📚 Baseado na documentação oficial:** [Changes to Table Partitioning in Greenplum 7](https://docs.vmware.com/en/VMware-Greenplum/7/greenplum-database/admin_guide-partitions-changes.html)
