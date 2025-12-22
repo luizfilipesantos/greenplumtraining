@@ -1,18 +1,17 @@
 # Módulo 5A: Manutenção e VACUUM
 
-**Duração Total:** 60-75 minutos  
 **Objetivo:** Dominar técnicas de manutenção de banco de dados, compreender o funcionamento do VACUUM e otimizar operações de limpeza no Greenplum.
 
 ---
 
 ## Índice
-1. [Lab 5A.1: Fundamentos do VACUUM](#lab-5a1-fundamentos-do-vacuum-20-25-min)
-2. [Lab 5A.2: VACUUM Avançado e Tuning](#lab-5a2-vacuum-avançado-e-tuning-20-25-min)
-3. [Lab 5A.3: Monitoramento e Automação](#lab-5a3-monitoramento-e-automação-20-25-min)
+1. [Lab 5A.1: Fundamentos do VACUUM](#lab-5a1-fundamentos-do-vacuum)
+2. [Lab 5A.2: VACUUM Avançado e Tuning](#lab-5a2-vacuum-avançado-e-tuning)
+3. [Lab 5A.3: Monitoramento e Automação](#lab-5a3-monitoramento-e-automação)
 
 ---
 
-## Lab 5A.1: Fundamentos do VACUUM (20-25 min)
+## Lab 5A.1: Fundamentos do VACUUM
 
 ### Objetivos
 - Entender o modelo MVCC do Greenplum
@@ -137,7 +136,14 @@ VACUUM teste_vacuum;
 \timing off
 ```
 
-2. Verifique resultados:
+2. Atualize as estatísticas:
+```sql
+-- VACUUM remove dead tuples mas NÃO atualiza pg_stat_user_tables automaticamente
+-- É necessário executar ANALYZE para atualizar as estatísticas
+ANALYZE teste_vacuum;
+```
+
+3. Verifique resultados:
 ```sql
 SELECT 
     schemaname,
@@ -152,10 +158,11 @@ WHERE relname = 'teste_vacuum';
 
 **Observações:**
 - `n_dead_tup` deve estar próximo de 0
+- `n_live_tup` agora mostra o valor correto (após ANALYZE)
 - `last_vacuum` atualizado
 - ⚠️ **Tamanho da tabela NÃO diminuiu!**
 
-3. Por que o tamanho não diminuiu?
+4. Por que o tamanho não diminuiu?
 ```sql
 -- VACUUM recupera espaço mas NÃO o devolve ao SO
 -- Espaço fica disponível para REUSo pela mesma tabela
