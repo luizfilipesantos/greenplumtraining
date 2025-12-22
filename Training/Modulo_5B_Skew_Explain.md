@@ -1,18 +1,17 @@
 # Módulo 5B: Detecção de Skew e EXPLAIN Avançado
 
-**Duração Total:** 90-120 minutos  
 **Objetivo:** Dominar técnicas de detecção de skew (dados e processamento), análise avançada de planos de execução e otimização de queries no Greenplum.
 
 ---
 
 ## Índice
-1. [Lab 5B.1: Data Skew - Detecção e Correção](#lab-5b1-data-skew---detecção-e-correção-30-35-min)
-2. [Lab 5B.2: Processing Skew - Identificação](#lab-5b2-processing-skew---identificação-25-30-min)
-3. [Lab 5B.3: EXPLAIN Avançado](#lab-5b3-explain-avançado-35-40-min)
+1. [Lab 5B.1: Data Skew - Detecção e Correção](#lab-5b1-data-skew---detecção-e-correção)
+2. [Lab 5B.2: Processing Skew - Identificação](#lab-5b2-processing-skew---identificação)
+3. [Lab 5B.3: EXPLAIN Avançado](#lab-5b3-explain-avançado)
 
 ---
 
-## Lab 5B.1: Data Skew - Detecção e Correção (30-35 min)
+## Lab 5B.1: Data Skew - Detecção e Correção
 
 ### Objetivos
 - Entender o que é data skew
@@ -82,8 +81,7 @@ ANALYZE vendas_skewed;
 ```sql
 SELECT 
     gp_segment_id,
-    COUNT(*) as num_rows,
-    pg_size_pretty(pg_relation_size(gp_segment_id)) as segment_size
+    COUNT(*) as num_rows
 FROM vendas_skewed
 GROUP BY gp_segment_id
 ORDER BY gp_segment_id;
@@ -458,7 +456,7 @@ SELECT * FROM analyze_table_skew('vendas_skewed');
 
 ---
 
-## Lab 5B.2: Processing Skew - Identificação (25-30 min)
+## Lab 5B.2: Processing Skew - Identificação
 
 ### Objetivos
 - Entender processing skew vs data skew
@@ -759,7 +757,7 @@ ORDER BY gp_segment_id;
 
 ---
 
-## Lab 5B.3: EXPLAIN Avançado (35-40 min)
+## Lab 5B.3: EXPLAIN Avançado
 
 ### Objetivos
 - Dominar interpretação de EXPLAIN ANALYZE
