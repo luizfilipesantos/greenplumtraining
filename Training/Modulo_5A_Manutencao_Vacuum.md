@@ -14,13 +14,11 @@
 ## Lab 5A.1: Fundamentos do VACUUM
 
 ### Objetivos
-- Entender o modelo MVCC do Greenplum
 - Compreender quando e por que usar VACUUM
 - Diferenciar VACUUM, VACUUM FULL e ANALYZE
 - Identificar problemas de bloat
 
 ### Conceitos Abordados
-- **MVCC (Multi-Version Concurrency Control):** Controle de versões de linhas
 - **Dead Tuples:** Linhas obsoletas após UPDATE/DELETE
 - **Bloat:** Espaço desperdiçado por linhas mortas
 - **Transaction ID Wraparound:** Proteção contra overflow de XIDs
@@ -68,7 +66,6 @@ ANALYZE teste_vacuum;
 
 2. Verifique estatísticas iniciais:
 ```sql
--- CORRIGIDO para Greenplum 7
 SELECT 
     schemaname,
     relname as tablename,
@@ -294,7 +291,6 @@ GROUP BY categoria;
 ## Resumo do Módulo 5A
 
 ### Checklist importante
-✅ Entender MVCC e dead tuples  
 ✅ Executar VACUUM, VACUUM FULL e VACUUM ANALYZE  
 ✅ Detectar e quantificar linhas mortas dos arquivos.
 ✅ Otimizar configurações de VACUUM  
